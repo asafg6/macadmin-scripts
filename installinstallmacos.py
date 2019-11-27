@@ -33,6 +33,8 @@ import os
 import plistlib
 import subprocess
 import sys
+import re
+
 try:
     # python 2
     from urllib.parse import urlsplit
@@ -61,6 +63,12 @@ SEED_CATALOGS_PLIST = (
     'Resources/SeedCatalogs.plist'
 )
 
+
+silent = False
+
+def oprint(*args, **kwargs):
+    if not silent:
+        print(*args, **kwargs)
 
 def get_input(prompt=None):
     '''Python 2 and 3 wrapper for raw_input/input'''
@@ -150,7 +158,7 @@ def make_compressed_dmg(app_path, diskimagepath):
     """Returns path to newly-created compressed r/o disk image containing
     Install macOS.app"""
 
-    print('Making read-only compressed disk image containing %s...'
+    oprint('Making read-only compressed disk image containing %s...'
           % os.path.basename(app_path))
     cmd = ['/usr/bin/hdiutil', 'create', '-fs', 'HFS+',
            '-srcfolder', app_path, diskimagepath]
@@ -159,7 +167,7 @@ def make_compressed_dmg(app_path, diskimagepath):
     except subprocess.CalledProcessError as err:
         print(err, file=sys.stderr)
     else:
-        print('Disk image created at: %s' % diskimagepath)
+        oprint('Disk image created at: %s' % diskimagepath)
 
 
 def mountdmg(dmgpath):
@@ -196,8 +204,8 @@ def unmountdmg(mountpoint):
                             stderr=subprocess.PIPE)
     (dummy_output, err) = proc.communicate()
     if proc.returncode:
-        print('Polite unmount failed: %s' % err, file=sys.stderr)
-        print('Attempting to force unmount %s' % mountpoint, file=sys.stderr)
+        oprint('Polite unmount failed: %s' % err, file=sys.stderr)
+        oprint('Attempting to force unmount %s' % mountpoint, file=sys.stderr)
         # try forcing the unmount
         retcode = subprocess.call(['/usr/bin/hdiutil', 'detach', mountpoint,
                                    '-force'])
@@ -208,9 +216,14 @@ def unmountdmg(mountpoint):
 def install_product(dist_path, target_vol):
     '''Install a product to a target volume.
     Returns a boolean to indicate success or failure.'''
+    global silent
     cmd = ['/usr/sbin/installer', '-pkg', dist_path, '-target', target_vol]
+
     try:
-        subprocess.check_call(cmd)
+        if silent:
+            subprocess.check_call(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        else:
+            subprocess.check_call(cmd)
     except subprocess.CalledProcessError as err:
         print(err, file=sys.stderr)
         return False
@@ -219,13 +232,13 @@ def install_product(dist_path, target_vol):
         # /tmp/dmg.T9ak1HApplications
         path = target_vol + 'Applications'
         if os.path.exists(path):
-            print('*********************************************************')
-            print('*** Working around a very dumb Apple bug in a package ***')
-            print('*** postinstall script that fails to correctly target ***')
-            print('*** the Install macOS.app when installed to a volume  ***')
-            print('*** other than the current boot volume.               ***')
-            print('***       Please file feedback with Apple!            ***')
-            print('*********************************************************')
+            oprint('*********************************************************')
+            oprint('*** Working around a very dumb Apple bug in a package ***')
+            oprint('*** postinstall script that fails to correctly target ***')
+            oprint('*** the Install macOS.app when installed to a volume  ***')
+            oprint('*** other than the current boot volume.               ***')
+            oprint('***       Please file feedback with Apple!            ***')
+            oprint('*********************************************************')
             subprocess.check_call(
                 ['/usr/bin/ditto',
                  path,
@@ -246,7 +259,7 @@ def replicate_url(full_url,
                   attempt_resume=False):
     '''Downloads a URL and stores it in the same relative path on our
     filesystem. Returns a path to the replicated file.'''
-
+    global silent
     path = urlsplit(full_url)[2]
     relative_url = path.lstrip('/')
     relative_url = os.path.normpath(relative_url)
@@ -262,7 +275,9 @@ def replicate_url(full_url,
         if attempt_resume:
             curl_cmd.extend(['-C', '-'])
     curl_cmd.append(full_url)
-    print("Downloading %s..." % full_url)
+    if silent:
+        curl_cmd.extend(['--silent'])
+    oprint("Downloading %s..." % full_url)
     try:
         subprocess.check_call(curl_cmd)
     except subprocess.CalledProcessError as err:
@@ -458,6 +473,7 @@ def find_installer_app(mountpoint):
 
 
 def main():
+    global silent
     '''Do the main thing here'''
     parser = argparse.ArgumentParser()
     parser.add_argument('--seedprogram', default='',
@@ -482,12 +498,18 @@ def main():
                         'less available disk space and is faster.')
     parser.add_argument('--ignore-cache', action='store_true',
                         help='Ignore any previously cached files.')
+    parser.add_argument('--autoinstallmatch', default='', help='Match this string and auto install')
+    parser.add_argument('--silent', action='store_true', help='Only output final path')
+
     args = parser.parse_args()
 
     if os.getuid() != 0:
         sys.exit('This command requires root (to install packages), so please '
                  'run again with sudo or as root.')
-    
+
+    if args.silent:
+        silent = True
+
     if args.catalogurl:
         su_catalog_url = args.catalogurl
     elif args.seedprogram:
@@ -516,29 +538,41 @@ def main():
               file=sys.stderr)
         exit(-1)
 
-    # display a menu of choices (some seed catalogs have multiple installers)
-    print('%2s %12s %10s %8s %11s  %s'
-          % ('#', 'ProductID', 'Version', 'Build', 'Post Date', 'Title'))
-    for index, product_id in enumerate(product_info):
-        print('%2s %12s %10s %8s %11s  %s' % (
-            index + 1,
-            product_id,
-            product_info[product_id]['version'],
-            product_info[product_id]['BUILD'],
-            product_info[product_id]['PostDate'].strftime('%Y-%m-%d'),
-            product_info[product_id]['title']
-        ))
-
-    answer = get_input(
-        '\nChoose a product to download (1-%s): ' % len(product_info))
-    try:
-        index = int(answer) - 1
-        if index < 0:
-            raise ValueError
+    autoinstallmatch = args.autoinstallmatch
+    if autoinstallmatch:
+        found = False
+        for index, product_id in enumerate(product_info):
+            if re.findall(autoinstallmatch, product_info[product_id]['title'].lower()):
+                found = True
+                break
+        if not found:
+            print('no match found... exiting.')
+            exit(0)
         product_id = list(product_info.keys())[index]
-    except (ValueError, IndexError):
-        print('Exiting.')
-        exit(0)
+    else:
+        # display a menu of choices (some seed catalogs have multiple installers)
+        print('%2s %12s %10s %8s %11s  %s'
+            % ('#', 'ProductID', 'Version', 'Build', 'Post Date', 'Title'))
+        for index, product_id in enumerate(product_info):
+            print('%2s %12s %10s %8s %11s  %s' % (
+                index + 1,
+                product_id,
+                product_info[product_id]['version'],
+                product_info[product_id]['BUILD'],
+                product_info[product_id]['PostDate'].strftime('%Y-%m-%d'),
+                product_info[product_id]['title']
+            ))
+
+        answer = get_input(
+            '\nChoose a product to download (1-%s): ' % len(product_info))
+        try:
+            index = int(answer) - 1
+            if index < 0:
+                raise ValueError
+            product_id = list(product_info.keys())[index]
+        except (ValueError, IndexError):
+            print('Exiting.')
+            exit(0)
 
     # download all the packages for the selected product
     replicate_product(
@@ -553,7 +587,7 @@ def main():
         os.unlink(sparse_diskimage_path)
 
     # make an empty sparseimage and mount it
-    print('Making empty sparseimage...')
+    oprint('Making empty sparseimage...') 
     sparse_diskimage_path = make_sparse_image(volname, sparse_diskimage_path)
     mountpoint = mountdmg(sparse_diskimage_path)
     if mountpoint:
@@ -570,10 +604,12 @@ def main():
         if seeding_program:
             installer_app = find_installer_app(mountpoint)
             if installer_app:
-                print("Adding seeding program %s extended attribute to app"
+                oprint("Adding seeding program %s extended attribute to app"
                       % seeding_program)
                 xattr.setxattr(installer_app, 'SeedProgram', seeding_program)
-        print('Product downloaded and installed to %s' % sparse_diskimage_path)
+        oprint('Product downloaded and installed to %s' % sparse_diskimage_path)
+        if silent:
+            print(sparse_diskimage_path)
         if args.raw:
             unmountdmg(mountpoint)
         else:
