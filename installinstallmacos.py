@@ -66,6 +66,12 @@ SEED_CATALOGS_PLIST = (
 
 silent = False
 
+def allow_any_board_dist(dist_path):
+    '''replace "if (boardIds.indexOf(boardId) == -1)" with "if (false)"'''
+    import fileinput
+    for line in fileinput.FileInput(dist_path, inplace=1):
+        print(line.replace('if (boardIds.indexOf(boardId) == -1)', 'if (false)').rstrip('\n'))
+
 def oprint(*args, **kwargs):
     if not silent:
         print(*args, **kwargs)
@@ -216,6 +222,7 @@ def unmountdmg(mountpoint):
 def install_product(dist_path, target_vol):
     '''Install a product to a target volume.
     Returns a boolean to indicate success or failure.'''
+    allow_any_board_dist(dist_path)    
     global silent
     cmd = ['/usr/sbin/installer', '-pkg', dist_path, '-target', target_vol]
 
